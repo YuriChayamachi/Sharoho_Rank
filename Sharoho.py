@@ -1,4 +1,11 @@
 # -*- coding: utf-8 -*-
+#
+# 使い方:
+#   23:59 JST にスクリプトを実行する。
+#
+# $ python Syaroho.py
+#
+
 import locale
 import os
 import sys
@@ -45,14 +52,7 @@ class Listener(tweepy.StreamListener):
                     screen_name=status.author.screen_name, name=status.author.name
                 )
                 + "記録: {time}\n".format(
-                    time=record.created_at.strftime("%H:%M:%S.")
-                    + "%03d"
-                    % round(
-                        datetime.fromtimestamp(
-                            ((record.id >> 22) + 1288834974657) / 1000.0
-                        ).microsecond
-                        / 1000
-                    )
+                    time=record.created_at.strftime("%H:%M:%S.%f")[:-3]
                 )
                 + "順位: {rank}\n".format(rank=rank)
                 + "使用クライアント: {client}".format(client=record.source)
@@ -80,7 +80,7 @@ class Sharoho:
         self.img_path = path.normpath(IMG_PATH)
         self.img = Image.new("RGB", (819, 2048), (192, 192, 192))
         self.user_rank = 0
-        self.day = datetime.now(pytz.timezone("Asia/Tokyo")).date()
+        self.day = datetime.now(pytz.timezone("Asia/Tokyo")).date() + timedelta(days=1)
         title = self.day.strftime(
             "20%y年%m月%d日のしゃろほー集計結果(@{screen_name})".format(screen_name=self.screen_name)
         )
@@ -116,28 +116,44 @@ class Sharoho:
 
     def make_img(self):
         since_date = (
-            (datetime.now(pytz.timezone("Asia/Tokyo")) - timedelta(days=1))
-            .date()
-            .isoformat()
-        )
+            datetime.now(pytz.timezone("Asia/Tokyo")) - timedelta(days=1)
+        ).date()
         print(since_date)
         self.status_list = [
             s
             for s in tweepy.Cursor(
-                self.api.search, q=f"しゃろほー since:{since_date}"
+                self.api.search,
+                q=f"しゃろほー since:{since_date} until:{since_date + timedelta(days=1)}",
             ).items(200)
             if s.text == "しゃろほー"
         ]
-        self.status_list.reverse()
+        # 元の created_at は秒単位の精度しかないので id からミリ秒精度の時刻を付け直す
         for status in self.status_list:
-            status.created_at += timedelta(hours=9)
-        rank_list = [s for s in self.status_list if s.created_at.minute == 0]
-        rank_list.insert(0, self.status_list[self.status_list.index(rank_list[0]) - 1])
-        if not rank_list[1].user.protected:
-            self.api.retweet(rank_list[1].id)
-        self.draw_status(rank_list[0], "DQ.")
-        for i in range(1, min(len(rank_list), 76)):
-            self.draw_status(rank_list[i], str(i))
+            status.created_at = self.id_to_datetime(status.id) + timedelta(hours=9)
+        self.status_list = sorted(self.status_list, key=lambda x: x.created_at)
+        rank_list = [
+            s
+            for s in self.status_list
+            if s.created_at.minute == 0 and s.created_at.hour == 0
+        ]
+        dq_list = [
+            s
+            for s in self.status_list
+            if s.created_at.minute == 59 and s.created_at.hour == 23
+        ]
+        winner_list = [s for s in rank_list if s.created_at == rank_list[0].created_at]
+        if len(dq_list):
+            rank_list.insert(0, dq_list[-1])
+        for winner in winner_list:
+            if not winner.user.protected:
+                self.api.retweet(winner.id)
+        if len(dq_list):
+            self.draw_status(rank_list[0], "DQ.")
+            for i in range(1, min(len(rank_list), 76)):
+                self.draw_status(rank_list[i], str(i))
+        else:
+            for i in range(1, min(len(rank_list), 76)):
+                self.draw_status(rank_list[i - 1], str(i))
         box = (0, 0, 819, 59 + (self.user_rank + 3) * 26)
         self.img = self.img.crop(box)
         self.img.save(self.img_path, "JPEG", quality=100, optimize=True)
@@ -148,11 +164,15 @@ class Sharoho:
         stream = tweepy.Stream(self.api.auth, listener)
         stream.filter(track=["@" + self.screen_name])
 
+    @staticmethod
+    def id_to_datetime(status_id):
+        return datetime.fromtimestamp(((status_id >> 22) + 1288834974657) / 1000.0)
+
 
 def main():
     bot = Sharoho()
     bot.api.update_status("しゃろほー観測中")
-    sleep(70)
+    sleep(120)
     bot.make_img()
     bot.api.update_with_media(
         bot.img_path, status=bot.day.strftime("20%y年%m月%d日のしゃろほー集計結果")
